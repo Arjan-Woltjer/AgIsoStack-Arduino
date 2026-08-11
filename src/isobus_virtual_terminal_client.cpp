@@ -3116,6 +3116,36 @@ namespace isobus
 									{
 										LOG_ERROR("[VT]: Reported other errors in EOM response");
 									}
+									// Decode the Object Pool Error Codes byte per ISO 11783-6 (2004)
+									// section C.2.5 "End of Object Pool Response message", so a
+									// rejection doesn't need to be looked up against the standard by
+									// hand every time. Bit 3 is boilerplate (the standard states a VT
+									// should delete the pool from volatile memory on any error at
+									// all), so it's only surfaced when it's the sole bit set, which
+									// would itself be unusual and worth knowing about.
+									if (0 != objectPoolErrorBitmask)
+									{
+										bool decodedAnyBit = false;
+										if (0 != (objectPoolErrorBitmask & 0x01))
+										{
+											LOG_ERROR("[VT]: Object pool error bit 0: method or attribute not supported by the VT.");
+											decodedAnyBit = true;
+										}
+										if (0 != (objectPoolErrorBitmask & 0x02))
+										{
+											LOG_ERROR("[VT]: Object pool error bit 1: unknown object reference (missing object).");
+											decodedAnyBit = true;
+										}
+										if (0 != (objectPoolErrorBitmask & 0x04))
+										{
+											LOG_ERROR("[VT]: Object pool error bit 2: any other error.");
+											decodedAnyBit = true;
+										}
+										if ((0 != (objectPoolErrorBitmask & 0x08)) && (!decodedAnyBit))
+										{
+											LOG_ERROR("[VT]: Object pool error bit 3 only: pool deleted from volatile memory, no other error bit set (unusual -- normally rides along with bit 0/1/2).");
+										}
+									}
 								}
 							}
 						}
