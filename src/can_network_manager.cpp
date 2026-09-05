@@ -566,6 +566,11 @@ namespace isobus
 					    (currentControlFunction->get_can_port() == channelIndex))
 					{
 						controlFunctionTable[channelIndex][claimedAddress] = currentControlFunction;
+						// This CF is being restored to the table precisely because it just announced its
+						// address, so credit it for this roll-call. Without this it re-enters the table
+						// with the flag still false and is eligible for pruning again on the very next
+						// roll-call, which turns a single eviction into an unbroken offline/online cycle.
+						currentControlFunction->claimedAddressSinceLastAddressClaimRequest = true;
 						LOG_DEBUG("[NM]: %s CF '%016llx' is now active at address '%d' on channel '%d'.",
 						          currentControlFunction->get_type_string().c_str(),
 						          currentControlFunction->get_NAME().get_full_name(),
