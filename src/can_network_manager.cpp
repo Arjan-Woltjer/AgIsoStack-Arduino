@@ -804,6 +804,16 @@ namespace isobus
 						// Populate the partner's data
 						partner->address = currentActiveControlFunction->get_address();
 						partner->controlFunctionNAME = currentActiveControlFunction->get_NAME();
+						// Carry over liveness too, not just address/NAME. Without this the
+						// adopted partner starts with claimedAddressSinceLastAddressClaimRequest
+						// still at its default `false`, so the very next PGN 60928 (Address
+						// Claim) request seen anywhere on the bus -- routine when another node
+						// notices a newly-joined implement -- makes
+						// prune_inactive_control_functions() evict this partner 755ms later
+						// (MAX_ADDRESS_CLAIM_RESOLUTION_TIME) even though it never stopped being
+						// valid. currentActiveControlFunction is already in the active table, so
+						// its flag is already true and safe to copy. See #584.
+						partner->claimedAddressSinceLastAddressClaimRequest = currentActiveControlFunction->claimedAddressSinceLastAddressClaimRequest;
 						partner->initialized = true;
 						controlFunctionTable[partner->get_can_port()][partner->address] = std::shared_ptr<ControlFunction>(partner);
 						process_control_function_state_change_callback(partner, ControlFunctionState::Online);
