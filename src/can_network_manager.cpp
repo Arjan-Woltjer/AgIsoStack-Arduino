@@ -1070,7 +1070,15 @@ namespace isobus
 					auto controlFunction = controlFunctionTable[channelIndex][i];
 					if ((nullptr != controlFunction) &&
 					    (!controlFunction->claimedAddressSinceLastAddressClaimRequest) &&
-					    (ControlFunction::Type::Internal != controlFunction->get_type()))
+					    (ControlFunction::Type::Internal != controlFunction->get_type()) &&
+					    // Partnered CFs are exempt from the roll-call prune. A partner is one we
+					    // explicitly bound to and are actively conversing with; a bus address-claim
+					    // roll-call (PGN 60928 request) must not silently evict it out from under a
+					    // live VT/TC session. Genuine partner loss is still detected by the client's
+					    // own status timeout (VirtualTerminalClient's VT_STATUS_TIMEOUT_MS, and
+					    // TaskControllerClient's server status timeout), which is the correct layer
+					    // for it. See MeijWorks/NeptuneGPS_Triton issue #22 for the field evidence.
+					    (ControlFunction::Type::Partnered != controlFunction->get_type()))
 					{
 						inactiveControlFunctions.push_back(controlFunction);
 						LOG_INFO("[NM]: Control function with address %u and NAME %016llx is now offline on channel %u.", controlFunction->get_address(), controlFunction->get_NAME(), channelIndex);
