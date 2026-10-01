@@ -395,6 +395,7 @@ namespace isobus
 		std::array<std::deque<std::uint32_t>, CAN_PORT_MAXIMUM> busloadMessageBitsHistory; ///< Stores the approximate number of bits processed on each channel over multiple previous time windows
 		std::array<std::uint32_t, CAN_PORT_MAXIMUM> currentBusloadBitAccumulator; ///< Accumulates the approximate number of bits processed on each channel during the current time window
 		std::array<std::uint32_t, CAN_PORT_MAXIMUM> lastAddressClaimRequestTimestamp_ms; ///< Stores timestamps for when the last request for the address claim PGN was received. Used to prune stale CFs.
+		std::array<std::uint32_t, CAN_PORT_MAXIMUM> lastAddressedAddressClaimRequestTimestamp_ms; ///< Stores timestamps for when the last request for the address claim PGN sent to one specific CF was received, 0 once every such request on the channel has been resolved.
 
 		std::array<std::array<std::shared_ptr<ControlFunction>, NULL_CAN_ADDRESS>, CAN_PORT_MAXIMUM> controlFunctionTable; ///< Table to maintain address to NAME mappings
 		std::list<std::shared_ptr<ControlFunction>> inactiveControlFunctions; ///< A list of the control function that currently don't have a valid address

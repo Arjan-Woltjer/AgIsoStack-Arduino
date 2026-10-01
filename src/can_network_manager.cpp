@@ -492,6 +492,7 @@ namespace isobus
 	{
 		currentBusloadBitAccumulator.fill(0);
 		lastAddressClaimRequestTimestamp_ms.fill(0);
+		lastAddressedAddressClaimRequestTimestamp_ms.fill(0);
 		controlFunctionTable.fill({ nullptr });
 
 		auto send_frame_callback = [this](std::uint32_t parameterGroupNumber,
@@ -556,6 +557,7 @@ namespace isobus
 			if (targetControlFunction != nullptr)
 			{
 				targetControlFunction->claimedAddressSinceLastAddressClaimRequest = true;
+				targetControlFunction->addressedAddressClaimRequestTimestamp_ms = 0; // Any request addressed to it is answered too
 			}
 			else
 			{
@@ -571,6 +573,7 @@ namespace isobus
 						// with the flag still false and is eligible for pruning again on the very next
 						// roll-call, which turns a single eviction into an unbroken offline/online cycle.
 						currentControlFunction->claimedAddressSinceLastAddressClaimRequest = true;
+						currentControlFunction->addressedAddressClaimRequestTimestamp_ms = 0;
 						LOG_DEBUG("[NM]: %s CF '%016llx' is now active at address '%d' on channel '%d'.",
 						          currentControlFunction->get_type_string().c_str(),
 						          currentControlFunction->get_NAME().get_full_name(),
@@ -589,17 +592,40 @@ namespace isobus
 
 			if (static_cast<std::uint32_t>(CANLibParameterGroupNumber::AddressClaim) == requestedPGN)
 			{
-				lastAddressClaimRequestTimestamp_ms.at(channelIndex) = SystemTiming::get_timestamp_ms();
+				std::uint8_t requestDestination = message.get_identifier().get_destination_address();
 
-				// Reset the claimedAddressSinceLastAddressClaimRequest flag for all control functions in the table on the port.
-				// Inactive CFs are left alone: the prune only looks at the table, and an inactive CF is credited when
-				// update_address_table() restores it on its own address claim.
-				std::for_each(controlFunctionTable[channelIndex].begin(), controlFunctionTable[channelIndex].end(), [](std::shared_ptr<ControlFunction> controlFunction) {
-					if (nullptr != controlFunction)
+				if (CANIdentifier::GLOBAL_ADDRESS == requestDestination)
+				{
+					lastAddressClaimRequestTimestamp_ms.at(channelIndex) = SystemTiming::get_timestamp_ms();
+
+					// Reset the claimedAddressSinceLastAddressClaimRequest flag for all control functions in the table on the port.
+					// Inactive CFs are left alone: the prune only looks at the table, and an inactive CF is credited when
+					// update_address_table() restores it on its own address claim.
+					std::for_each(controlFunctionTable[channelIndex].begin(), controlFunctionTable[channelIndex].end(), [](std::shared_ptr<ControlFunction> controlFunction) {
+						if (nullptr != controlFunction)
+						{
+							controlFunction->claimedAddressSinceLastAddressClaimRequest = false;
+						}
+					});
+				}
+				else if (requestDestination < NULL_CAN_ADDRESS)
+				{
+					// A request for address claim sent to a specific address only obliges the CF at that address to
+					// respond (ISO 11783-5, SAE J1939-81); everyone else stays silent and is right to. Treating it as a
+					// global roll-call meant that whenever one node polls several CFs in turn, each request wiped the
+					// answer the previous CF had just given and re-armed the prune for all of them, so a CF that
+					// answered its own request was evicted 755ms after the request to the next one. Only the addressed
+					// CF is marked, with its own deadline, and a pending global roll-call is left as it is.
+					// Our internal CFs answer through their own address claim state machine and are never pruned.
+					auto targetControlFunction = controlFunctionTable[channelIndex][requestDestination];
+					if ((nullptr != targetControlFunction) &&
+					    (ControlFunction::Type::Internal != targetControlFunction->get_type()))
 					{
-						controlFunction->claimedAddressSinceLastAddressClaimRequest = false;
+						targetControlFunction->claimedAddressSinceLastAddressClaimRequest = false;
+						targetControlFunction->addressedAddressClaimRequestTimestamp_ms = SystemTiming::get_timestamp_ms();
+						lastAddressedAddressClaimRequestTimestamp_ms.at(channelIndex) = targetControlFunction->addressedAddressClaimRequestTimestamp_ms;
 					}
-				});
+				}
 			}
 		}
 	}
@@ -814,6 +840,7 @@ namespace isobus
 						// valid. currentActiveControlFunction is already in the active table, so
 						// its flag is already true and safe to copy. See #584.
 						partner->claimedAddressSinceLastAddressClaimRequest = currentActiveControlFunction->claimedAddressSinceLastAddressClaimRequest;
+						partner->addressedAddressClaimRequestTimestamp_ms = currentActiveControlFunction->addressedAddressClaimRequestTimestamp_ms;
 						partner->initialized = true;
 						controlFunctionTable[partner->get_can_port()][partner->address] = std::shared_ptr<ControlFunction>(partner);
 						process_control_function_state_change_callback(partner, ControlFunctionState::Online);
@@ -1057,13 +1084,39 @@ namespace isobus
 		for (std::uint_fast8_t channelIndex = 0; channelIndex < CAN_PORT_MAXIMUM; channelIndex++)
 		{
 			constexpr std::uint32_t MAX_ADDRESS_CLAIM_RESOLUTION_TIME = 755; // This is 250ms + RTxD + 250ms
-			if ((0 != lastAddressClaimRequestTimestamp_ms.at(channelIndex)) &&
-			    (SystemTiming::time_expired_ms(lastAddressClaimRequestTimestamp_ms.at(channelIndex), MAX_ADDRESS_CLAIM_RESOLUTION_TIME)))
+			const bool globalRequestExpired = ((0 != lastAddressClaimRequestTimestamp_ms.at(channelIndex)) &&
+			                                   (SystemTiming::time_expired_ms(lastAddressClaimRequestTimestamp_ms.at(channelIndex), MAX_ADDRESS_CLAIM_RESOLUTION_TIME)));
+			const bool addressedRequestPending = (0 != lastAddressedAddressClaimRequestTimestamp_ms.at(channelIndex));
+			// Checked before the loop: every CF's addressed deadline is at or before this one, so once it has expired they all have
+			const bool addressedRequestsExpired = (addressedRequestPending &&
+			                                       (SystemTiming::time_expired_ms(lastAddressedAddressClaimRequestTimestamp_ms.at(channelIndex), MAX_ADDRESS_CLAIM_RESOLUTION_TIME)));
+
+			if (globalRequestExpired || addressedRequestPending)
 			{
 				for (std::uint_fast8_t i = 0; i < NULL_CAN_ADDRESS; i++)
 				{
 					auto controlFunction = controlFunctionTable[channelIndex][i];
-					if ((nullptr != controlFunction) &&
+					bool deadlinePassed = false;
+
+					if (nullptr != controlFunction)
+					{
+						if (0 != controlFunction->addressedAddressClaimRequestTimestamp_ms)
+						{
+							// This CF was asked for its address claim directly and has not answered yet. That request has
+							// its own deadline, which is the one that counts, even if a global roll-call window closes first.
+							deadlinePassed = SystemTiming::time_expired_ms(controlFunction->addressedAddressClaimRequestTimestamp_ms, MAX_ADDRESS_CLAIM_RESOLUTION_TIME);
+							if (deadlinePassed)
+							{
+								controlFunction->addressedAddressClaimRequestTimestamp_ms = 0;
+							}
+						}
+						else
+						{
+							deadlinePassed = globalRequestExpired;
+						}
+					}
+
+					if (deadlinePassed &&
 					    (!controlFunction->claimedAddressSinceLastAddressClaimRequest) &&
 					    (ControlFunction::Type::Internal != controlFunction->get_type()) &&
 					    // Partnered CFs are exempt from the roll-call prune. A partner is one we
@@ -1081,13 +1134,21 @@ namespace isobus
 						controlFunction->address = NULL_CAN_ADDRESS;
 						process_control_function_state_change_callback(controlFunction, ControlFunctionState::Offline);
 					}
-					else if ((nullptr != controlFunction) &&
+					else if (deadlinePassed &&
 					         (!controlFunction->claimedAddressSinceLastAddressClaimRequest))
 					{
 						process_control_function_state_change_callback(controlFunction, ControlFunctionState::Offline);
 					}
 				}
-				lastAddressClaimRequestTimestamp_ms.at(channelIndex) = 0;
+
+				if (globalRequestExpired)
+				{
+					lastAddressClaimRequestTimestamp_ms.at(channelIndex) = 0;
+				}
+				if (addressedRequestsExpired)
+				{
+					lastAddressedAddressClaimRequestTimestamp_ms.at(channelIndex) = 0;
+				}
 			}
 		}
 	}
